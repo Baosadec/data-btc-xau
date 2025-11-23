@@ -1,5 +1,5 @@
 import { GoogleGenAI } from "@google/genai";
-import { ChartDataPoint, FundingRate, HighLowData, TimeFrame, ChartMode } from '../types.ts';
+import { ChartDataPoint, FundingRate, HighLowData, TimeFrame } from '../types';
 
 // Constants
 const BINANCE_API = 'https://api.binance.com/api/v3';
@@ -31,6 +31,7 @@ export const fetchBTCPrice = async () => {
 
 export const fetchGoldPrice = async () => {
   // Use PAXGUSDT (Paxos Gold) as a proxy for Real-Time Gold Price
+  // PAXG is backed 1:1 by physical gold and trades on Binance
   const data = await safeFetch(`${BINANCE_API}/ticker/24hr?symbol=PAXGUSDT`);
   if (!data) return { price: 2650, changePercent: 0 };
   
@@ -57,7 +58,7 @@ export const fetchFundingRates = async (): Promise<FundingRate[]> => {
   ];
 };
 
-export const fetchHighLow = async (symbol: string = 'BTCUSDT'): Promise<HighLowData[]> => {
+export const fetchHighLow = async (): Promise<HighLowData[]> => {
   const definitions = [
     { label: '1 Giờ', interval: '1h', limit: 2 }, 
     { label: '4 Giờ', interval: '4h', limit: 2 },
@@ -66,7 +67,7 @@ export const fetchHighLow = async (symbol: string = 'BTCUSDT'): Promise<HighLowD
   ];
 
   const results = await Promise.all(definitions.map(async (def) => {
-    const data = await safeFetch(`${BINANCE_API}/klines?symbol=${symbol}&interval=${def.interval}&limit=${def.limit}`);
+    const data = await safeFetch(`${BINANCE_API}/klines?symbol=BTCUSDT&interval=${def.interval}&limit=${def.limit}`);
     
     if (!data || data.length === 0) {
       return {
@@ -125,24 +126,17 @@ export const fetchChartData = async (timeFrame: TimeFrame): Promise<ChartDataPoi
     safeFetch(`${BINANCE_API}/klines?symbol=PAXGUSDT&interval=${interval}&limit=${limit}`)
   ]);
 
-  if (!btcKlines && !goldKlines) return [];
+  if (!btcKlines || !goldKlines) return [];
 
-  const btcData = btcKlines || [];
-  
   // Create a map for Gold prices by timestamp for easier lookup
   const goldMap = new Map();
-  if (goldKlines) {
-    goldKlines.forEach((k: any) => {
-      goldMap.set(k[0], parseFloat(k[4]));
-    });
-  }
+  goldKlines.forEach((k: any) => {
+    goldMap.set(k[0], parseFloat(k[4]));
+  });
 
-  // If BTC fails but Gold exists, use Gold timestamps (unlikely scenario but robust)
-  const baseData = btcData.length > 0 ? btcData : (goldKlines || []);
-
-  return baseData.map((k: any) => {
+  return btcKlines.map((k: any) => {
     const timestamp = k[0];
-    const btcClose = btcData.length > 0 ? parseFloat(k[4]) : 0;
+    const btcClose = parseFloat(k[4]);
     
     // Get real gold price matching timestamp, or fallback to previous known or 2650
     const xauClose = goldMap.get(timestamp) || 2650;
@@ -166,86 +160,26 @@ export const fetchChartData = async (timeFrame: TimeFrame): Promise<ChartDataPoi
 
 // --- AI ANALYST ---
 
-interface AnalysisInput {
-  btcPrice: number;
-  btcChange: number;
-  goldPrice: number;
-  goldChange: number;
-  fundingRate: number;
-  btcVolatility: HighLowData[];
-  goldVolatility: HighLowData[];
-}
-
-export const fetchAIAnalysis = async (marketData: AnalysisInput, mode: ChartMode) => {
+export const fetchAIAnalysis = async (marketData: any) => {
   try {
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
     
-    // Helper to format volatility for prompt
-    const formatVol = (data: HighLowData[]) => {
-      return data.map(d => `- ${d.timeframe}: Range ${d.rangePercent.toFixed(2)}% (High: $${d.high}, Low: $${d.low})`).join('\n');
-    };
+    const prompt = `
+      Bạn là một chuyên gia phân tích tài chính cấp cao (Senior Market Analyst).
+      Hãy phân tích dữ liệu thị trường hiện tại dưới đây và đưa ra nhận định ngắn gọn (tối đa 150 từ):
 
-    let prompt = "";
+      Dữ liệu hiện tại:
+      - Bitcoin (BTC): $${marketData.btcPrice} (Biến động 24h: ${marketData.btcChange}%)
+      - Vàng (XAU/PAXG): $${marketData.goldPrice} (Biến động 24h: ${marketData.goldChange}%)
+      - Funding Rate Binance: ${marketData.fundingRate}%
 
-    if (mode === 'btc') {
-      prompt = `
-        Đóng vai một **Chuyên gia Giao dịch Bitcoin (Crypto Trader Pro)**.
-        Hãy phân tích kỹ thuật sâu (Deep Dive) cho BTC/USDT dựa trên dữ liệu đa khung thời gian sau:
-        
-        1. **Dữ liệu Giá**: $${marketData.btcPrice} (24h: ${marketData.btcChange}%)
-        2. **Tâm lý & Đòn bẩy**: Funding Rate ${marketData.fundingRate}% (Dương cao = Long đông/FOMO, Âm = Short đông).
-        3. **Biến động giá (Volatility Structure)**:
-        ${formatVol(marketData.btcVolatility)}
-
-        **Yêu cầu phân tích:**
-        1. **Cấu trúc thị trường**: Phân tích hành động giá dựa trên High/Low của khung 4H và 24H. Phe nào đang kiểm soát?
-        2. **Vùng thanh khoản**: Xác định hỗ trợ/kháng cự quan trọng.
-        3. **TÍN HIỆU GIAO DỊCH (SIGNAL)**: Bắt buộc đưa ra kết luận rõ ràng:
-           - 🟢 **MUA (BUY/LONG)**: Entry vùng nào?
-           - 🔴 **BÁN (SELL/SHORT)**: Entry vùng nào?
-           - 🟡 **CHỜ (WAIT)**: Nếu thị trường sideway.
-
-        Trả lời ngắn gọn, format Markdown, dùng icon. Tập trung vào tín hiệu.
-      `;
-    } else if (mode === 'gold') {
-      prompt = `
-        Đóng vai một **Chuyên gia Giao dịch Vàng & Hàng hóa (Commodities Trader)**.
-        Hãy phân tích kỹ thuật sâu cho Vàng (XAU/USD - PAXG) dựa trên dữ liệu thực tế:
-
-        1. **Dữ liệu Giá**: $${marketData.goldPrice} (24h: ${marketData.goldChange}%)
-        2. **Biến động giá (Volatility Structure)**:
-        ${formatVol(marketData.goldVolatility)}
-
-        **Yêu cầu phân tích:**
-        1. **Xu hướng chủ đạo**: Đánh giá trend dựa trên biên độ dao động (Range) 4H và 24H.
-        2. **Tâm lý thị trường**: Dòng tiền đang trú ẩn hay chốt lời?
-        3. **TÍN HIỆU GIAO DỊCH (SIGNAL)**: Bắt buộc đưa ra kết luận:
-           - 🟢 **LONG (MUA)**
-           - 🔴 **SHORT (BÁN)**
-           - 🟡 **QUAN SÁT (Neutral)**
-
-        Trả lời ngắn gọn, format Markdown, dùng icon.
-      `;
-    } else {
-      // Combined / Overlay
-      prompt = `
-        Đóng vai một **Chuyên gia Chiến lược Vĩ mô (Macro Strategist)**.
-        Phân tích tương quan liên thị trường giữa Bitcoin và Vàng:
-
-        - **BTC**: $${marketData.btcPrice} (${marketData.btcChange}%)
-        - **Gold**: $${marketData.goldPrice} (${marketData.goldChange}%)
-        
-        - **Biến động BTC**: Range 24H là ${marketData.btcVolatility.find(d => d.timeframe.includes('24'))?.rangePercent.toFixed(2)}%
-        - **Biến động Gold**: Range 24H là ${marketData.goldVolatility.find(d => d.timeframe.includes('24'))?.rangePercent.toFixed(2)}%
-
-        **Yêu cầu:**
-        1. **Tương quan (Correlation)**: Hai tài sản đang đi cùng chiều (Risk-on/Risk-off) hay ngược chiều (Trú ẩn)?
-        2. **Dòng tiền thông minh**: Tiền đang chảy vào đâu mạnh hơn dựa trên % thay đổi và biến động?
-        3. **Khuyến nghị phân bổ**: Tỷ trọng nắm giữ cho ngắn hạn (Ví dụ: 70% BTC / 30% Gold).
-
-        Trả lời ngắn gọn, xúc tích, format Markdown.
-      `;
-    }
+      Yêu cầu:
+      1. Phân tích tương quan ngắn hạn giữa BTC và Vàng hiện tại.
+      2. Đánh giá tâm lý thị trường dựa trên Funding Rate (Dương quá cao = Hưng phấn/FOMO, Âm = Sợ hãi).
+      3. Đưa ra 1 dự báo xu hướng ngắn hạn (Bullish/Bearish/Neutral).
+      
+      Hãy trả lời bằng Tiếng Việt, sử dụng icon cho sinh động. Định dạng Markdown.
+    `;
 
     const response = await ai.models.generateContent({
       model: 'gemini-2.5-flash',
