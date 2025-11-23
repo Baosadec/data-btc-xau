@@ -1,0 +1,5 @@
+{
+  "name": "CryptoGold Dashboard",
+  "description": "Real-time Bitcoin and Gold market dashboard with correlation analysis, funding rates, and multi-timeframe volatility tracking.",
+  "requestFramePermissions": []
+}
